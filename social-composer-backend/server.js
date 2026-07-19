@@ -14,7 +14,9 @@ const PORT = process.env.PORT || 5000;
 // After deploying to Vercel, update CLIENT_URL on Render to your live URL.
 app.use(
   cors({
-    origin: process.env.CLIENT_URL || 'http://localhost:5173',
+    origin: function (origin, callback) {
+      callback(null, true);
+    },
     credentials: true,
   })
 );
