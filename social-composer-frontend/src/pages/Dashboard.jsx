@@ -6,7 +6,7 @@ import PostCard from '../components/PostCard';
 const API = import.meta.env.VITE_API_URL;
 
 export default function Dashboard() {
-  const { token } = useAuth();
+  const { token, user } = useAuth();
   const navigate = useNavigate();
 
   const [posts, setPosts] = useState([]);
@@ -53,6 +53,39 @@ export default function Dashboard() {
     }
   };
 
+  const handleDeleteSingle = async (id) => {
+    const confirmed = window.confirm('Delete this post? This action cannot be undone.');
+    if (!confirmed) return;
+
+    setDeleting(true);
+    setError('');
+    try {
+      const res = await fetch(`${API}/api/posts/${id}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.message || 'Delete failed.');
+
+      setDeleteSuccess('Post deleted successfully.');
+      setTimeout(() => setDeleteSuccess(''), 3000);
+      setSelectedIds((prev) => {
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      });
+      await fetchPosts();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setDeleting(false);
+    }
+  };
+
+  const handleEdit = (post) => {
+    navigate('/compose', { state: { post } });
+  };
+
   const handleBulkDelete = async () => {
     if (selectedIds.size === 0) return;
     const confirmed = window.confirm(
@@ -90,9 +123,12 @@ export default function Dashboard() {
       {/* Page Header */}
       <div className="page-header">
         <div>
-          <h1 className="page-title">Your Posts</h1>
+          <h1 className="page-title">
+            {user?.role === 'admin' ? 'Admin Panel — All Posts' : 'Your Posts'}
+          </h1>
           <p className="page-subtitle">
             {posts.length} post{posts.length !== 1 ? 's' : ''} total
+            {user?.role === 'admin' && ' (Admin View)'}
           </p>
         </div>
         <div className="page-header-actions">
@@ -177,8 +213,11 @@ export default function Dashboard() {
             <PostCard
               key={post._id}
               post={post}
+              userRole={user?.role}
               isSelected={selectedIds.has(post._id)}
               onToggleSelect={toggleSelect}
+              onEdit={() => handleEdit(post)}
+              onDelete={() => handleDeleteSingle(post._id)}
             />
           ))}
         </div>

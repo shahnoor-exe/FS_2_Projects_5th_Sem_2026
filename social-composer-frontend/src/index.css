@@ -1132,3 +1132,39 @@ a {
     grid-template-columns: 1fr;
   }
 }
+
+/* PostCard Hover Actions */
+.post-card .card-actions-overlay {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  display: flex;
+  gap: 8px;
+  opacity: 0;
+  transition: opacity 0.2s ease;
+  z-index: 10;
+}
+.post-card:hover .card-actions-overlay {
+  opacity: 1;
+}
+.card-action-btn {
+  background: rgba(15, 23, 42, 0.7);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: #fff;
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  backdrop-filter: blur(4px);
+  transition: all 0.2s ease;
+}
+.card-action-btn:hover {
+  background: rgba(99, 102, 241, 0.9);
+  transform: translateY(-2px);
+}
+.card-action-btn.delete:hover {
+  background: rgba(248, 113, 113, 0.9);
+}

@@ -1,5 +1,5 @@
 import { useState, useRef } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 
 const API = import.meta.env.VITE_API_URL;
@@ -10,12 +10,19 @@ export default function Composer() {
   const { token } = useAuth();
   const navigate = useNavigate();
 
-  const [title, setTitle] = useState('');
-  const [description, setDescription] = useState('');
-  const [status, setStatus] = useState('draft');
-  const [selectedPlatforms, setSelectedPlatforms] = useState([]);
+  const location = useLocation();
+  const editPost = location.state?.post;
+  const isEdit = !!editPost;
+
+  const [title, setTitle] = useState(editPost?.title || '');
+  const [description, setDescription] = useState(editPost?.description || '');
+  const [status, setStatus] = useState(editPost?.status || 'draft');
+  const [selectedPlatforms, setSelectedPlatforms] = useState(editPost?.platforms || []);
   const [mediaFile, setMediaFile] = useState(null);
-  const [mediaPreview, setMediaPreview] = useState(null);
+  const [mediaPreview, setMediaPreview] = useState(
+    editPost?.mediaUrl ? { url: editPost.mediaUrl, type: editPost.mediaResourceType } : null
+  );
+  const [removeExistingMedia, setRemoveExistingMedia] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
@@ -38,6 +45,7 @@ export default function Composer() {
   const removeMedia = () => {
     setMediaFile(null);
     setMediaPreview(null);
+    setRemoveExistingMedia(true);
     if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
@@ -66,21 +74,25 @@ export default function Composer() {
       formData.append('platforms', JSON.stringify(selectedPlatforms));
       if (mediaFile) {
         formData.append('media', mediaFile);
+      } else if (isEdit && removeExistingMedia) {
+        formData.append('removeMedia', 'true');
       }
 
-      const res = await fetch(`${API}/api/posts`, {
-        method: 'POST',
+      const url = isEdit ? `${API}/api/posts/${editPost._id}` : `${API}/api/posts`;
+      const method = isEdit ? 'PUT' : 'POST';
+
+      const res = await fetch(url, {
+        method,
         headers: {
-          // ⚠️ Do NOT add Content-Type here — the browser sets it with the multipart boundary
           Authorization: `Bearer ${token}`,
         },
         body: formData,
       });
 
       const data = await res.json();
-      if (!res.ok) throw new Error(data.message || 'Failed to create post.');
+      if (!res.ok) throw new Error(data.message || `Failed to ${isEdit ? 'update' : 'create'} post.`);
 
-      setSuccess('Post created successfully!');
+      setSuccess(`Post ${isEdit ? 'updated' : 'created'} successfully!`);
       setTimeout(() => navigate('/'), 1500);
     } catch (err) {
       setError(err.message);
@@ -93,7 +105,7 @@ export default function Composer() {
     <div className="page-container">
       <div className="page-header">
         <div>
-          <h1 className="page-title">New Post</h1>
+          <h1 className="page-title">{isEdit ? 'Edit Post' : 'New Post'}</h1>
           <p className="page-subtitle">Compose and schedule your social content.</p>
         </div>
         <button
@@ -282,10 +294,10 @@ export default function Composer() {
               {submitting ? (
                 <>
                   <span className="btn-spinner" />
-                  Uploading…
+                  {isEdit ? 'Updating…' : 'Uploading…'}
                 </>
               ) : (
-                'Create Post'
+                isEdit ? 'Update Post' : 'Create Post'
               )}
             </button>
           </div>

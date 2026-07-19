@@ -52,8 +52,18 @@ app.use((err, req, res, next) => {
 // ─── Database + Server Start ──────────────────────────────────────────────────
 mongoose
   .connect(process.env.MONGO_URI)
-  .then(() => {
+  .then(async () => {
     console.log('✅  Connected to MongoDB Atlas');
+
+    // Seed Admin Account
+    const User = require('./models/User');
+    const adminExists = await User.findOne({ role: 'admin' });
+    if (!adminExists) {
+      const passwordHash = await User.hashPassword(process.env.ADMIN_PASSWORD || 'admin123');
+      await User.create({ username: 'admin', passwordHash, role: 'admin' });
+      console.log('✅  Default admin account seeded (username: admin, password: admin123)');
+    }
+
     app.listen(PORT, () => {
       console.log(`🚀  Server running on http://localhost:${PORT}`);
     });
