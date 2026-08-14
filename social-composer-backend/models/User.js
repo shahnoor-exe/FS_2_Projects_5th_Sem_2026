@@ -23,6 +23,10 @@ const userSchema = new mongoose.Schema(
       enum: ['editor', 'admin'],
       default: 'editor',
     },
+    isActive: {
+      type: Boolean,
+      default: true,
+    },
   },
   {
     timestamps: true,

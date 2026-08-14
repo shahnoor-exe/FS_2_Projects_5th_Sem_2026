@@ -33,7 +33,7 @@ router.get('/', async (req, res) => {
  */
 router.post('/', upload.single('media'), async (req, res) => {
   try {
-    const { title, description, status, platforms } = req.body;
+    const { title, description, status, platforms, scheduledDate, timezone } = req.body;
 
     if (!title) {
       return res.status(400).json({ message: 'Post title is required.' });
@@ -67,6 +67,8 @@ router.post('/', upload.single('media'), async (req, res) => {
       mediaResourceType,
       platforms: parsedPlatforms,
       status: status || 'draft',
+      scheduledDate: scheduledDate ? new Date(scheduledDate) : null,
+      timezone: timezone || 'UTC',
     });
 
     res.status(201).json(post);
@@ -84,7 +86,7 @@ router.post('/', upload.single('media'), async (req, res) => {
 router.put('/:id', upload.single('media'), async (req, res) => {
   try {
     const { id } = req.params;
-    const { title, description, status, platforms, removeMedia } = req.body;
+    const { title, description, status, platforms, removeMedia, scheduledDate, timezone } = req.body;
 
     const post = await Post.findById(id);
     if (!post) {
@@ -106,6 +108,10 @@ router.put('/:id', upload.single('media'), async (req, res) => {
         return res.status(400).json({ message: 'platforms must be a valid JSON array.' });
       }
     }
+    if (scheduledDate !== undefined) {
+      post.scheduledDate = scheduledDate ? new Date(scheduledDate) : null;
+    }
+    if (timezone) post.timezone = timezone;
 
     // Handle media updates (upload new media or remove existing)
     if (req.file || removeMedia === 'true') {
@@ -161,6 +167,65 @@ router.delete('/:id', async (req, res) => {
   } catch (err) {
     console.error('Delete post error:', err);
     res.status(500).json({ message: 'Failed to delete post.' });
+  }
+});
+
+// ─── POST /api/posts/:id/cancel ───────────────────────────────────────────────
+/**
+ * Cancel a scheduled post.
+ */
+router.post('/:id/cancel', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const query = req.user.role === 'admin' ? { _id: id } : { _id: id, authorId: req.user.id };
+    const post = await Post.findOne(query);
+
+    if (!post) return res.status(404).json({ message: 'Post not found or unauthorized.' });
+    if (post.status !== 'scheduled') return res.status(400).json({ message: 'Only scheduled posts can be cancelled.' });
+
+    post.status = 'cancelled';
+    await post.save();
+    
+    // Log if admin cancelled someone else's post
+    if (req.user.role === 'admin' && post.authorId.toString() !== req.user.id) {
+      const AuditLog = require('../models/AuditLog');
+      await AuditLog.create({
+        adminId: req.user.id,
+        action: 'CANCEL_POST',
+        targetId: post._id,
+        targetModel: 'Post',
+        details: 'Admin cancelled a scheduled post.'
+      });
+    }
+
+    res.json(post);
+  } catch (err) {
+    console.error('Cancel post error:', err);
+    res.status(500).json({ message: 'Failed to cancel post.' });
+  }
+});
+
+// ─── POST /api/posts/:id/retry ────────────────────────────────────────────────
+/**
+ * Retry a failed or cancelled post by moving it back to draft.
+ */
+router.post('/:id/retry', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const query = req.user.role === 'admin' ? { _id: id } : { _id: id, authorId: req.user.id };
+    const post = await Post.findOne(query);
+
+    if (!post) return res.status(404).json({ message: 'Post not found or unauthorized.' });
+    if (!['failed', 'cancelled'].includes(post.status)) {
+      return res.status(400).json({ message: 'Only failed or cancelled posts can be retried.' });
+    }
+
+    post.status = 'draft';
+    await post.save();
+    res.json(post);
+  } catch (err) {
+    console.error('Retry post error:', err);
+    res.status(500).json({ message: 'Failed to retry post.' });
   }
 });
 

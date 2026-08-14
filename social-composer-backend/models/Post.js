@@ -50,8 +50,27 @@ const postSchema = new mongoose.Schema(
     },
     status: {
       type: String,
-      enum: ['draft', 'published', 'scheduled'],
+      enum: ['draft', 'published', 'scheduled', 'failed', 'cancelled'],
       default: 'draft',
+    },
+    scheduledDate: {
+      type: Date,
+      default: null,
+    },
+    timezone: {
+      type: String,
+      default: 'UTC',
+    },
+    publicationHistory: {
+      type: [
+        {
+          platform: String,
+          status: { type: String, enum: ['success', 'failed', 'pending'] },
+          error: String,
+          publishedAt: Date,
+        }
+      ],
+      default: [],
     },
   },
   {

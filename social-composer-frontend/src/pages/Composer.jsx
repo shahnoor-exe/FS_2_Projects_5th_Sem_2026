@@ -18,6 +18,10 @@ export default function Composer() {
   const [description, setDescription] = useState(editPost?.description || '');
   const [status, setStatus] = useState(editPost?.status || 'draft');
   const [selectedPlatforms, setSelectedPlatforms] = useState(editPost?.platforms || []);
+  const [scheduledDate, setScheduledDate] = useState(
+    editPost?.scheduledDate ? new Date(editPost.scheduledDate).toISOString().slice(0, 16) : ''
+  );
+  const [timezone, setTimezone] = useState(editPost?.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone);
   const [mediaFile, setMediaFile] = useState(null);
   const [mediaPreview, setMediaPreview] = useState(
     editPost?.mediaUrl ? { url: editPost.mediaUrl, type: editPost.mediaResourceType } : null
@@ -72,6 +76,11 @@ export default function Composer() {
       formData.append('description', description.trim());
       formData.append('status', status);
       formData.append('platforms', JSON.stringify(selectedPlatforms));
+      if (status === 'scheduled') {
+        if (!scheduledDate) throw new Error('Scheduled date is required for scheduled status.');
+        formData.append('scheduledDate', new Date(scheduledDate).toISOString());
+        formData.append('timezone', timezone);
+      }
       if (mediaFile) {
         formData.append('media', mediaFile);
       } else if (isEdit && removeExistingMedia) {
@@ -201,6 +210,39 @@ export default function Composer() {
               <option value="scheduled">Scheduled</option>
             </select>
           </div>
+
+          {/* Scheduling Details (if scheduled) */}
+          {status === 'scheduled' && (
+            <div className="form-group" style={{ display: 'flex', gap: '1rem' }}>
+              <div style={{ flex: 1 }}>
+                <label htmlFor="post-scheduled-date" className="form-label">
+                  Date & Time <span className="required">*</span>
+                </label>
+                <input
+                  id="post-scheduled-date"
+                  type="datetime-local"
+                  className="form-input"
+                  value={scheduledDate}
+                  onChange={(e) => setScheduledDate(e.target.value)}
+                  disabled={submitting}
+                  required
+                />
+              </div>
+              <div style={{ flex: 1 }}>
+                <label htmlFor="post-timezone" className="form-label">
+                  Timezone
+                </label>
+                <input
+                  id="post-timezone"
+                  type="text"
+                  className="form-input"
+                  value={timezone}
+                  onChange={(e) => setTimezone(e.target.value)}
+                  disabled={submitting}
+                />
+              </div>
+            </div>
+          )}
 
           {/* Media Upload */}
           <div className="form-group">

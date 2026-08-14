@@ -36,8 +36,24 @@ export default function Navbar() {
           Dashboard
         </Link>
         <Link to="/compose" className={`nav-link ${isActive('/compose') ? 'active' : ''}`}>
-          New Post
+          Composer
         </Link>
+        <Link to="/calendar" className={`nav-link ${isActive('/calendar') ? 'active' : ''}`}>
+          Calendar
+        </Link>
+        {user?.role === 'admin' && (
+          <>
+            <Link to="/admin" className={`nav-link ${isActive('/admin') ? 'active' : ''}`}>
+              Metrics
+            </Link>
+            <Link to="/admin/users" className={`nav-link ${isActive('/admin/users') ? 'active' : ''}`}>
+              Users
+            </Link>
+            <Link to="/admin/logs" className={`nav-link ${isActive('/admin/logs') ? 'active' : ''}`}>
+              Logs
+            </Link>
+          </>
+        )}
       </div>
 
       <div className="navbar-user">
