@@ -14,6 +14,7 @@ import {
   TenantMismatchError,
 } from '../../utils/errors.js';
 import { RegisterInput, LoginInput, SystemRole, PermissionAction } from '@orgsphere/shared';
+import { ensureSystemRoles } from '../../utils/roles.js';
 
 const REFRESH_TOKEN_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 const DUPLICATE_RACE_WINDOW_MS = 5000; // 5-second bounded duplicate window (RFC 9700)
@@ -100,41 +101,9 @@ export class AuthService {
         },
       });
 
-      // 3. Ensure ORG_ADMIN role exists and has permissions
-      let adminRole = await tx.role.findUnique({
-        where: { name: SystemRole.ORG_ADMIN },
-      });
-
-      if (!adminRole) {
-        adminRole = await tx.role.create({
-          data: {
-            name: SystemRole.ORG_ADMIN,
-            description: 'Organization Administrator with full tenant access',
-            isSystemRole: true,
-          },
-        });
-
-        // Ensure permissions exist
-        const allPermissions = Object.values(PermissionAction);
-        for (const action of allPermissions) {
-          const perm = await tx.permission.upsert({
-            where: { action },
-            create: { action, description: `Permission to ${action}` },
-            update: {},
-          });
-
-          await tx.rolePermission.upsert({
-            where: {
-              roleId_permissionId: {
-                roleId: adminRole.id,
-                permissionId: perm.id,
-              },
-            },
-            create: { roleId: adminRole.id, permissionId: perm.id },
-            update: {},
-          });
-        }
-      }
+      // 3. Ensure all 4 system roles and 12 permissions exist
+      const systemRoles = await ensureSystemRoles(tx);
+      const adminRole = systemRoles[SystemRole.ORG_ADMIN];
 
       // 4. Create OrganizationMembership
       await tx.organizationMembership.create({

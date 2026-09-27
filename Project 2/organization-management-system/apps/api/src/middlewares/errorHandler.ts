@@ -1,5 +1,6 @@
 import { Request, Response, NextFunction } from 'express';
 import { ZodError } from 'zod';
+import { Prisma } from '@prisma/client';
 import { AppError } from '../utils/errors.js';
 import { env } from '../config/env.js';
 import { logger } from '../config/logger.js';
@@ -46,6 +47,55 @@ export function errorHandler(
       },
     };
     return res.status(400).json(response);
+  }
+
+  // Handle Prisma Known Request Errors (e.g. P2002 Unique Constraint, P2003 Foreign Key)
+  if (err instanceof Prisma.PrismaClientKnownRequestError) {
+    if (err.code === 'P2002') {
+      const target = Array.isArray(err.meta?.target)
+        ? (err.meta?.target as string[]).join('_')
+        : String(err.meta?.target || '');
+
+      let code: string = ErrorCode.CONFLICT;
+      let message = 'A unique constraint violation occurred.';
+
+      if (target.includes('slug')) {
+        code = ErrorCode.SLUG_ALREADY_EXISTS;
+        message = 'Organization slug is already in use.';
+      } else if (target.includes('name') || target.includes('organization_id_name')) {
+        code = ErrorCode.DEPARTMENT_NAME_EXISTS;
+        message = 'A department with this name already exists in this organization.';
+      } else if (target.includes('user_id') || target.includes('membership')) {
+        code = ErrorCode.MEMBERSHIP_ALREADY_EXISTS;
+        message = 'User is already a member of this organization.';
+      }
+
+      logger.warn({ err, requestId, code, target }, message);
+      const response: ApiErrorResponse = {
+        success: false,
+        error: {
+          code,
+          message,
+          requestId,
+          ...(env.NODE_ENV === 'development' ? { stack: err.stack } : {}),
+        },
+      };
+      return res.status(409).json(response);
+    }
+
+    if (err.code === 'P2003') {
+      logger.warn({ err, requestId }, 'Foreign key constraint violated');
+      const response: ApiErrorResponse = {
+        success: false,
+        error: {
+          code: ErrorCode.CONFLICT,
+          message: 'Referenced entity does not exist or relational boundary constraint violated.',
+          requestId,
+          ...(env.NODE_ENV === 'development' ? { stack: err.stack } : {}),
+        },
+      };
+      return res.status(409).json(response);
+    }
   }
 
   // Unhandled / Internal Server Errors

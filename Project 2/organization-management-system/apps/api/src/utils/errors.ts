@@ -30,20 +30,20 @@ export class AuthenticationError extends AppError {
 }
 
 export class AuthorizationError extends AppError {
-  constructor(message = 'Insufficient permissions for this action') {
-    super(message, 403, ErrorCode.FORBIDDEN);
+  constructor(message = 'Insufficient permissions for this action', code: ErrorCodeType | string = ErrorCode.FORBIDDEN, details?: unknown) {
+    super(message, 403, code, details);
   }
 }
 
 export class NotFoundError extends AppError {
-  constructor(message = 'Resource not found') {
-    super(message, 404, ErrorCode.NOT_FOUND);
+  constructor(message = 'Resource not found', code: ErrorCodeType | string = ErrorCode.NOT_FOUND, details?: unknown) {
+    super(message, 404, code, details);
   }
 }
 
 export class ConflictError extends AppError {
-  constructor(message = 'Resource conflict detected') {
-    super(message, 409, ErrorCode.CONFLICT);
+  constructor(message = 'Resource conflict detected', code: ErrorCodeType | string = ErrorCode.CONFLICT, details?: unknown) {
+    super(message, 409, code, details);
   }
 }
 
