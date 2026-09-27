@@ -330,28 +330,31 @@ export class AuthService {
     }
 
     const tokenHash = hashRefreshToken(cleartextToken);
-    const now = new Date();
 
     // 1. Attempt atomic conditional claim inside interactive transaction
-    const rotateResult = await prisma.$transaction(async (tx) => {
-      // Lock the token row with SELECT ... FOR UPDATE to serialize concurrent rotation attempts
-      const lockedRows = await tx.$queryRaw<Array<{ id: string }>>`
-        SELECT id FROM refresh_tokens WHERE token_hash = ${tokenHash} FOR UPDATE
-      `;
+    const rotateResult = await prisma.$transaction(
+      async (tx) => {
+        // Lock the token row with SELECT ... FOR UPDATE to serialize concurrent rotation attempts
+        const lockedRows = await tx.$queryRaw<Array<{ id: string }>>`
+          SELECT id FROM refresh_tokens WHERE token_hash = ${tokenHash} FOR UPDATE
+        `;
 
-      if (!lockedRows || lockedRows.length === 0) {
-        throw new AuthenticationError('Invalid refresh token');
-      }
+        if (!lockedRows || lockedRows.length === 0) {
+          throw new AuthenticationError('Invalid refresh token');
+        }
 
-      // Read the token with relations under the exclusive row lock
-      const existingToken = await tx.refreshToken.findUniqueOrThrow({
-        where: { id: lockedRows[0].id },
-        include: {
-          user: true,
-          organization: true,
-          membership: { include: { role: true } },
-        },
-      });
+        // Capture decision time immediately AFTER acquiring the exclusive row lock
+        const now = new Date();
+
+        // Read the token with relations under the exclusive row lock
+        const existingToken = await tx.refreshToken.findUniqueOrThrow({
+          where: { id: lockedRows[0].id },
+          include: {
+            user: true,
+            organization: true,
+            membership: { include: { role: true } },
+          },
+        });
 
       // Check if already revoked
       if (existingToken.revokedAt) {
@@ -363,9 +366,12 @@ export class AuthService {
         }
 
         // Bounded duplicate window check (RFC 9700):
-        // If revoked within 5s as ROTATED, treat as concurrent race duplicate.
+        // If revoked within 5s as ROTATED or ORG_SWITCH, treat as concurrent race duplicate.
         // DO NOT revoke family; winner replacement remains usable!
-        if (existingToken.revocationReason === 'ROTATED' && timeSinceRevocation <= DUPLICATE_RACE_WINDOW_MS) {
+        if (
+          (existingToken.revocationReason === 'ROTATED' || existingToken.revocationReason === 'ORG_SWITCH') &&
+          timeSinceRevocation <= DUPLICATE_RACE_WINDOW_MS
+        ) {
           throw new ConcurrentRefreshRaceError();
         }
 
@@ -436,7 +442,7 @@ export class AuthService {
 
       // Generate replacement token inheriting the same familyId
       const { cleartextToken: newCleartext, tokenHash: newHash } = generateRefreshToken();
-      const expiresAt = new Date(Date.now() + REFRESH_TOKEN_TTL_MS);
+      const expiresAt = new Date(now.getTime() + REFRESH_TOKEN_TTL_MS);
 
       const replacement = await tx.refreshToken.create({
         data: {
@@ -476,7 +482,7 @@ export class AuthService {
         accessToken: newAccessToken,
         refreshToken: newCleartext,
       };
-    });
+    }, { maxWait: 10000, timeout: 15000 });
 
     if ('replayDetected' in rotateResult && rotateResult.replayDetected) {
       throw new AuthenticationError('Session invalid due to token replay detection');
@@ -530,61 +536,243 @@ export class AuthService {
   }
 
   /**
-   * Switch tenant context, verifying active membership in target organization.
+   * Switch tenant context, establishing valid session possession, rotating refresh token,
+   * verifying active membership in target organization, and issuing target-scoped credentials.
+   *
+   * Architectural Limitation:
+   * Revoking the presented refresh token prevents further refresh through that token/session family
+   * (without preventing Org A token issuance through another independently valid session the user may hold).
+   * However, any already-issued Org A access token remains cryptographically valid until its 15-minute expiry,
+   * subject to live active-membership checks in PostgreSQL. The browser client is responsible for discarding
+   * the old access token upon a successful switch; the server does not claim that stateless access tokens
+   * are instantly revoked.
    */
   async switchOrg(
     userId: string,
+    currentOrgId: string,
     targetOrganizationId: string,
+    cleartextRefreshToken: string,
     ipAddress?: string,
     requestId?: string
-  ): Promise<{ accessToken: string; organization: { id: string; name: string; slug: string } }> {
-    const membership = await prisma.organizationMembership.findUnique({
-      where: {
-        userId_organizationId: {
-          userId,
-          organizationId: targetOrganizationId,
-        },
-      },
-      include: {
-        user: true,
-        organization: true,
-        role: true,
-      },
-    });
-
-    if (!membership) {
-      throw new TenantMismatchError('User is not a member of the requested organization');
+  ): Promise<{
+    accessToken: string;
+    refreshToken: string;
+    organization: { id: string; name: string; slug: string };
+  }> {
+    if (!cleartextRefreshToken) {
+      throw new AuthenticationError('Refresh token required to switch organization session');
     }
 
-    if (!membership.user.isActive) throw new AccountDeactivatedError();
-    if (!membership.organization.isActive) throw new OrganizationDeactivatedError();
-    if (!membership.isActive) throw new MembershipDeactivatedError();
+    const tokenHash = hashRefreshToken(cleartextRefreshToken);
 
-    const newAccessToken = generateAccessToken({
-      userId,
-      email: membership.user.email,
-      organizationId: targetOrganizationId,
-      roleId: membership.roleId,
-      platformRole: membership.user.platformRole,
-    });
+    const switchResult = await prisma.$transaction(
+      async (tx) => {
+        // 1. Lock the token row with SELECT ... FOR UPDATE to serialize concurrent rotation/switch attempts
+        const lockedRows = await tx.$queryRaw<Array<{ id: string }>>`
+          SELECT id FROM refresh_tokens WHERE token_hash = ${tokenHash} FOR UPDATE
+        `;
 
-    await recordAuditLog({
-      organizationId: targetOrganizationId,
-      actorId: userId,
-      action: 'AUTH_ORG_SWITCH',
-      resourceType: 'Organization',
-      resourceId: targetOrganizationId,
-      ipAddress,
-      requestId,
-    });
+        if (!lockedRows || lockedRows.length === 0) {
+          throw new AuthenticationError('Invalid refresh token');
+        }
+
+        // Capture decision time immediately AFTER acquiring the exclusive row lock
+        const now = new Date();
+
+        // 2. Read the token with relations under exclusive row lock
+        const existingToken = await tx.refreshToken.findUniqueOrThrow({
+          where: { id: lockedRows[0].id },
+          include: {
+            user: true,
+            organization: true,
+            membership: { include: { role: true } },
+          },
+        });
+
+      // 3. Verify session binding: token must belong to caller and current organization of the bearer token
+      if (existingToken.userId !== userId || existingToken.organizationId !== currentOrgId) {
+        throw new AuthenticationError('Refresh token does not match active authenticated session');
+      }
+
+      // 4. Check revocation state
+      if (existingToken.revokedAt) {
+        const timeSinceRevocation = now.getTime() - existingToken.revokedAt.getTime();
+
+        if (existingToken.revocationReason === 'LOGOUT') {
+          throw new AuthenticationError('Session terminated');
+        }
+
+        // Bounded duplicate window check (RFC 9700):
+        // If revoked within 5s as ROTATED or ORG_SWITCH, serialize against race duplicate.
+        if (
+          (existingToken.revocationReason === 'ROTATED' || existingToken.revocationReason === 'ORG_SWITCH') &&
+          timeSinceRevocation <= DUPLICATE_RACE_WINDOW_MS
+        ) {
+          throw new ConcurrentRefreshRaceError();
+        }
+
+        // Outside duplicate window: Later Replay Attack Detected!
+        // Revoke entire token family to protect session
+        await tx.refreshToken.updateMany({
+          where: { familyId: existingToken.familyId, revokedAt: null },
+          data: { revokedAt: now, revocationReason: 'SECURITY_REUSE' },
+        });
+
+        await recordAuditLog({
+          organizationId: existingToken.organizationId,
+          actorId: existingToken.userId,
+          action: 'AUTH_TOKEN_REUSE_DETECTED',
+          resourceType: 'RefreshToken',
+          resourceId: existingToken.id,
+          ipAddress,
+          requestId,
+          metadata: { familyId: existingToken.familyId },
+          tx,
+        });
+
+        return {
+          replayDetected: true,
+          accessToken: '',
+          refreshToken: '',
+          organization: { id: '', name: '', slug: '' },
+        };
+      }
+
+      // 5. Check token expiration
+      if (existingToken.expiresAt <= now) {
+        throw new AuthenticationError('Refresh token expired');
+      }
+
+      // 6. Verify immediate active status across user, current org, and current membership
+      if (!existingToken.user.isActive) {
+        await tx.refreshToken.update({
+          where: { id: existingToken.id },
+          data: { revokedAt: now, revocationReason: 'USER_DEACTIVATED' },
+        });
+        return { userDeactivated: true, accessToken: '', refreshToken: '', organization: { id: '', name: '', slug: '' } };
+      }
+
+      if (!existingToken.organization.isActive) {
+        await tx.refreshToken.update({
+          where: { id: existingToken.id },
+          data: { revokedAt: now, revocationReason: 'ORG_DEACTIVATED' },
+        });
+        return { orgDeactivated: true, accessToken: '', refreshToken: '', organization: { id: '', name: '', slug: '' } };
+      }
+
+      if (!existingToken.membership.isActive) {
+        await tx.refreshToken.update({
+          where: { id: existingToken.id },
+          data: { revokedAt: now, revocationReason: 'MEMBERSHIP_DEACTIVATED' },
+        });
+        return { membershipDeactivated: true, accessToken: '', refreshToken: '', organization: { id: '', name: '', slug: '' } };
+      }
+
+      // 7. Verify active membership in the target organization
+      const targetMembership = await tx.organizationMembership.findUnique({
+        where: {
+          userId_organizationId: {
+            userId,
+            organizationId: targetOrganizationId,
+          },
+        },
+        include: {
+          user: true,
+          organization: true,
+          role: true,
+        },
+      });
+
+      if (!targetMembership) {
+        throw new TenantMismatchError('User is not a member of the requested organization');
+      }
+
+      if (!targetMembership.user.isActive) throw new AccountDeactivatedError();
+      if (!targetMembership.organization.isActive) throw new OrganizationDeactivatedError();
+      if (!targetMembership.isActive) throw new MembershipDeactivatedError();
+
+      // 8. Revoke presented token with ORG_SWITCH
+      await tx.refreshToken.update({
+        where: { id: existingToken.id },
+        data: {
+          revokedAt: now,
+          revocationReason: 'ORG_SWITCH',
+        },
+      });
+
+      // 9. Create target-tenant replacement refresh token inheriting familyId
+      const { cleartextToken: newCleartext, tokenHash: newHash } = generateRefreshToken();
+      const expiresAt = new Date(now.getTime() + REFRESH_TOKEN_TTL_MS);
+
+      const replacement = await tx.refreshToken.create({
+        data: {
+          tokenHash: newHash,
+          userId,
+          organizationId: targetOrganizationId,
+          familyId: existingToken.familyId,
+          expiresAt,
+        },
+      });
+
+      await tx.refreshToken.update({
+        where: { id: existingToken.id },
+        data: { replacedByTokenId: replacement.id },
+      });
+
+      // 10. Generate access token scoped to target organization
+      const newAccessToken = generateAccessToken({
+        userId,
+        email: targetMembership.user.email,
+        organizationId: targetOrganizationId,
+        roleId: targetMembership.roleId,
+        platformRole: targetMembership.user.platformRole,
+      });
+
+      // 11. Record audit log inside transaction
+      await recordAuditLog({
+        organizationId: targetOrganizationId,
+        actorId: userId,
+        action: 'AUTH_ORG_SWITCH',
+        resourceType: 'Organization',
+        resourceId: targetOrganizationId,
+        ipAddress,
+        requestId,
+        metadata: {
+          previousOrganizationId: currentOrgId,
+          targetOrganizationId,
+          replacementTokenId: replacement.id,
+        },
+        tx,
+      });
+
+      return {
+        accessToken: newAccessToken,
+        refreshToken: newCleartext,
+        organization: {
+          id: targetMembership.organization.id,
+          name: targetMembership.organization.name,
+          slug: targetMembership.organization.slug,
+        },
+      };
+    }, { maxWait: 10000, timeout: 15000 });
+
+    if ('replayDetected' in switchResult && switchResult.replayDetected) {
+      throw new AuthenticationError('Session invalid due to token replay detection');
+    }
+    if ('userDeactivated' in switchResult && switchResult.userDeactivated) {
+      throw new AccountDeactivatedError();
+    }
+    if ('orgDeactivated' in switchResult && switchResult.orgDeactivated) {
+      throw new OrganizationDeactivatedError();
+    }
+    if ('membershipDeactivated' in switchResult && switchResult.membershipDeactivated) {
+      throw new MembershipDeactivatedError();
+    }
 
     return {
-      accessToken: newAccessToken,
-      organization: {
-        id: membership.organization.id,
-        name: membership.organization.name,
-        slug: membership.organization.slug,
-      },
+      accessToken: switchResult.accessToken,
+      refreshToken: switchResult.refreshToken,
+      organization: switchResult.organization,
     };
   }
 

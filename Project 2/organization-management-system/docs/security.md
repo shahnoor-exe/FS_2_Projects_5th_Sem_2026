@@ -41,6 +41,18 @@
 - **Revocation**:
   - Logout, membership removal, and password changes immediately invalidate active refresh token records.
 
+### Organization Switching & Session Scope
+- **Endpoint**: `POST /api/v1/auth/switch-org`
+- **Session Credentials & CSRF Protection**:
+  - Requires an authenticated Bearer token and possession of the active `HttpOnly` refresh cookie.
+  - Enforces unconditional CSRF validation (`x-orgsphere-client` header and origin/referer verification).
+  - Rotates the presented refresh token (`revokedAt = NOW()`, `revocationReason = 'ORG_SWITCH'`) and issues a target-tenant refresh token within a serialized database transaction (`SELECT ... FOR UPDATE`).
+  - Sets the new target-tenant refresh cookie (`SameSite=Strict`, `HttpOnly`, `Path=/api/v1/auth`) and returns the target access token in JSON.
+- **Architectural Scope & Access Token Limitation**:
+  - Rotating this presented token prevents further refresh through that token/session family. It does not prevent Org A token issuance through some other independently valid session the user may hold.
+  - **Limitation**: Any previously issued Org A Bearer access token remains cryptographically valid until its 15-minute expiry (`exp`), subject to the backend's live active-membership checks (`requireOrgContext` PostgreSQL verification).
+  - The client application (browser) is responsible for discarding the old Org A access token from memory upon a successful switch; the server does not claim that stateless access tokens are instantly revoked.
+
 ---
 
 ## 3. Role-Based Access Control (RBAC) Matrix

@@ -544,4 +544,475 @@ describe('Phase 2 Auth & Access Control Integration Tests', () => {
     expect(cleared).toContain('Path=/api/v1/auth');
     expect(cleared).toMatch(/Expires=Thu, 01 Jan 1970|Max-Age=0/i);
   });
+
+  // ─── Switch-Org Session Management & Race Tests ─────────────────────────────
+  let orgBId: string;
+  let orgBName: string;
+
+  async function getOrgB(): Promise<{ id: string; name: string }> {
+    if (orgBId) return { id: orgBId, name: orgBName };
+    const alice = await prisma.user.findUniqueOrThrow({ where: { email: aliceEmail } });
+    orgBName = `Acme Beta ${runId}`;
+    const orgB = await prisma.organization.create({
+      data: {
+        name: orgBName,
+        slug: `acme-beta-${runId}`,
+        isActive: true,
+      },
+    });
+    trackedOrgIds.add(orgB.id);
+
+    const viewerRole = await prisma.role.findFirstOrThrow({ where: { name: 'VIEWER' } });
+    await prisma.organizationMembership.create({
+      data: {
+        userId: alice.id,
+        organizationId: orgB.id,
+        roleId: viewerRole.id,
+        isActive: true,
+      },
+    });
+    orgBId = orgB.id;
+    return { id: orgBId, name: orgBName };
+  }
+
+  it('proves switch-org rotates refresh cookie, binds to target tenant, and subsequent refresh + /auth/me retains switched organization', async () => {
+    const orgB = await getOrgB();
+
+    // 1. Alice logs in to primary organization
+    const loginRes = await request(app)
+      .post('/api/v1/auth/login')
+      .send({
+        email: aliceEmail,
+        password: 'alice-secure-passphrase-2026!',
+      });
+    expect(loginRes.status).toBe(200);
+    const primaryToken = loginRes.body.data.accessToken;
+    const cookieA = loginRes.headers['set-cookie'];
+    expect(cookieA).toBeDefined();
+
+    // 2. Switch to Org B
+    const switchRes = await request(app)
+      .post('/api/v1/auth/switch-org')
+      .set('Authorization', `Bearer ${primaryToken}`)
+      .set('Cookie', cookieA)
+      .set('Origin', 'http://localhost:3000')
+      .set('x-orgsphere-client', 'web')
+      .send({ targetOrganizationId: orgB.id });
+
+    expect(switchRes.status).toBe(200);
+    expect(switchRes.body.success).toBe(true);
+    expect(switchRes.body.data.organization.id).toBe(orgB.id);
+    expect(switchRes.body.data.accessToken).toBeDefined();
+    // Critical: Plaintext refresh token must NEVER be returned in JSON response
+    expect((switchRes.body.data as Record<string, unknown>).refreshToken).toBeUndefined();
+
+    // Verify newly issued cookie is present and scoped to /api/v1/auth
+    const cookieB = switchRes.headers['set-cookie'];
+    expect(cookieB).toBeDefined();
+    const cookieHeader = Array.isArray(cookieB) ? cookieB.join(';') : (cookieB as string);
+    expect(cookieHeader).toContain(getCookieName());
+    expect(cookieHeader).toContain('Path=/api/v1/auth');
+    expect(cookieHeader).toContain('HttpOnly');
+
+    // 3. Call /auth/refresh with the new cookie
+    const refreshRes = await request(app)
+      .post('/api/v1/auth/refresh')
+      .set('Cookie', cookieB)
+      .set('Origin', 'http://localhost:3000')
+      .set('x-orgsphere-client', 'web');
+
+    expect(refreshRes.status).toBe(200);
+    expect(refreshRes.body.success).toBe(true);
+    const refreshedToken = refreshRes.body.data.accessToken;
+    expect(refreshedToken).toBeDefined();
+
+    // 4. Call /auth/me with refreshed token -> verifies session remains Org B
+    const meRes = await request(app)
+      .get('/api/v1/auth/me')
+      .set('Authorization', `Bearer ${refreshedToken}`);
+
+    expect(meRes.status).toBe(200);
+    expect(meRes.body.data.currentOrganization.id).toBe(orgB.id);
+    expect(meRes.body.data.currentOrganization.name).toBe(orgB.name);
+    expect(meRes.body.data.currentOrganization.role).toBe('VIEWER');
+  });
+
+  it('proves browser reload after switch-org restores session bound to the target organization', async () => {
+    const orgB = await getOrgB();
+
+    // 1. Alice logs in to primary org
+    const loginRes = await request(app)
+      .post('/api/v1/auth/login')
+      .send({
+        email: aliceEmail,
+        password: 'alice-secure-passphrase-2026!',
+      });
+    const primaryToken = loginRes.body.data.accessToken;
+    const cookieA = loginRes.headers['set-cookie'];
+
+    // 2. Alice switches to Org B
+    const switchRes = await request(app)
+      .post('/api/v1/auth/switch-org')
+      .set('Authorization', `Bearer ${primaryToken}`)
+      .set('Cookie', cookieA)
+      .set('Origin', 'http://localhost:3000')
+      .set('x-orgsphere-client', 'web')
+      .send({ targetOrganizationId: orgB.id });
+
+    expect(switchRes.status).toBe(200);
+    const cookieB = switchRes.headers['set-cookie'];
+
+    // 3. Simulate browser reload: in-memory access token is lost.
+    // Browser startup initiates silent refresh using the persisted cookieB.
+    const reloadRefreshRes = await request(app)
+      .post('/api/v1/auth/refresh')
+      .set('Cookie', cookieB)
+      .set('Origin', 'http://localhost:3000')
+      .set('x-orgsphere-client', 'web');
+
+    expect(reloadRefreshRes.status).toBe(200);
+    const restoredAccessToken = reloadRefreshRes.body.data.accessToken;
+    expect(restoredAccessToken).toBeDefined();
+
+    // 4. Initial me query verifies the session is established for Org B, not Org A
+    const meRes = await request(app)
+      .get('/api/v1/auth/me')
+      .set('Authorization', `Bearer ${restoredAccessToken}`);
+
+    expect(meRes.status).toBe(200);
+    expect(meRes.body.data.currentOrganization.id).toBe(orgB.id);
+    expect(meRes.body.data.currentOrganization.name).toBe(orgB.name);
+  });
+
+  it('proves old pre-switch refresh cookie is revoked with ORG_SWITCH and rejected upon reuse', async () => {
+    const orgB = await getOrgB();
+
+    // 1. Alice logs in to primary org
+    const loginRes = await request(app)
+      .post('/api/v1/auth/login')
+      .send({
+        email: aliceEmail,
+        password: 'alice-secure-passphrase-2026!',
+      });
+    const primaryToken = loginRes.body.data.accessToken;
+    const cookieA = loginRes.headers['set-cookie'];
+
+    // 2. Switch to Org B rotates cookieA
+    const switchRes = await request(app)
+      .post('/api/v1/auth/switch-org')
+      .set('Authorization', `Bearer ${primaryToken}`)
+      .set('Cookie', cookieA)
+      .set('Origin', 'http://localhost:3000')
+      .set('x-orgsphere-client', 'web')
+      .send({ targetOrganizationId: orgB.id });
+    expect(switchRes.status).toBe(200);
+
+    // 3. Attempting to use old cookieA on /auth/refresh MUST be rejected
+    const staleRefreshRes = await request(app)
+      .post('/api/v1/auth/refresh')
+      .set('Cookie', cookieA)
+      .set('Origin', 'http://localhost:3000')
+      .set('x-orgsphere-client', 'web');
+
+    // Inside duplicate race window returns 409 CONCURRENT_REFRESH_RACE; outside returns 401
+    expect([401, 409]).toContain(staleRefreshRes.status);
+
+    // 4. Attempting to use old cookieA on /auth/switch-org MUST also be rejected
+    const staleSwitchRes = await request(app)
+      .post('/api/v1/auth/switch-org')
+      .set('Authorization', `Bearer ${primaryToken}`)
+      .set('Cookie', cookieA)
+      .set('Origin', 'http://localhost:3000')
+      .set('x-orgsphere-client', 'web')
+      .send({ targetOrganizationId: orgB.id });
+
+    expect([401, 409]).toContain(staleSwitchRes.status);
+  });
+
+  it('proves switch-org rejects requests with missing cookie, invalid CSRF, or mismatched session', async () => {
+    const orgB = await getOrgB();
+
+    const loginRes = await request(app)
+      .post('/api/v1/auth/login')
+      .send({
+        email: aliceEmail,
+        password: 'alice-secure-passphrase-2026!',
+      });
+    const primaryToken = loginRes.body.data.accessToken;
+    const cookieA = loginRes.headers['set-cookie'];
+
+    // 1. Missing cookie rejection: Bearer token provided with valid client headers, but no cookie
+    const missingCookieRes = await request(app)
+      .post('/api/v1/auth/switch-org')
+      .set('Authorization', `Bearer ${primaryToken}`)
+      .set('Origin', 'http://localhost:3000')
+      .set('x-orgsphere-client', 'web')
+      .send({ targetOrganizationId: orgB.id });
+
+    expect(missingCookieRes.status).toBe(401);
+    expect(missingCookieRes.body.error.code).toBe('UNAUTHENTICATED');
+    expect(missingCookieRes.body.error.message).toContain('Refresh cookie required');
+
+    // 2. Unconditional CSRF rejection: Missing trusted client header (with or without cookie)
+    const missingCsrfRes = await request(app)
+      .post('/api/v1/auth/switch-org')
+      .set('Authorization', `Bearer ${primaryToken}`)
+      .set('Cookie', cookieA)
+      .set('Origin', 'http://localhost:3000')
+      .send({ targetOrganizationId: orgB.id });
+
+    expect(missingCsrfRes.status).toBe(401);
+    expect(missingCsrfRes.body.error.message).toContain('CSRF');
+
+    // 3. Untrusted origin rejection
+    const badOriginRes = await request(app)
+      .post('/api/v1/auth/switch-org')
+      .set('Authorization', `Bearer ${primaryToken}`)
+      .set('Cookie', cookieA)
+      .set('Origin', 'https://attacker.evil.com')
+      .set('x-orgsphere-client', 'web')
+      .send({ targetOrganizationId: orgB.id });
+
+    expect(badOriginRes.status).toBe(401);
+    expect(badOriginRes.body.error.message).toContain('CSRF check failed: untrusted origin');
+
+    // 4. Session mismatch: Presenting another user's / another org's refresh token
+    const bobLoginRes = await request(app)
+      .post('/api/v1/auth/register')
+      .send({
+        email: bobEmail,
+        password: 'bob-secure-passphrase-2026!',
+        firstName: 'Bob',
+        lastName: 'Jones',
+        organizationName: `Bob Org ${runId}`,
+      });
+    trackedUserIds.add(bobLoginRes.body.data.user.id);
+    trackedOrgIds.add(bobLoginRes.body.data.organization.id);
+    const bobCookie = bobLoginRes.headers['set-cookie'];
+
+    const mismatchRes = await request(app)
+      .post('/api/v1/auth/switch-org')
+      .set('Authorization', `Bearer ${primaryToken}`)
+      .set('Cookie', bobCookie)
+      .set('Origin', 'http://localhost:3000')
+      .set('x-orgsphere-client', 'web')
+      .send({ targetOrganizationId: orgB.id });
+
+    expect(mismatchRes.status).toBe(401);
+    expect(mismatchRes.body.error.code).toBe('UNAUTHENTICATED');
+    expect(mismatchRes.body.error.message).toContain('Refresh token does not match active authenticated session');
+  });
+
+  it('proves that a request with a valid bearer token and refresh token supplied only in JSON body is rejected without setting cookie or creating replacement token', async () => {
+    const orgB = await getOrgB();
+
+    const loginRes = await request(app)
+      .post('/api/v1/auth/login')
+      .send({
+        email: aliceEmail,
+        password: 'alice-secure-passphrase-2026!',
+      });
+    const primaryToken = loginRes.body.data.accessToken;
+    const cookieA = loginRes.headers['set-cookie'];
+    const cookieStr = Array.isArray(cookieA) ? cookieA.join(';') : (cookieA as string);
+    const match = cookieStr.match(new RegExp(`${getCookieName()}=([^;]+)`));
+    const rawRefreshToken = match ? decodeURIComponent(match[1]) : 'dummy-refresh-token';
+
+    // Count target tokens before the attempt
+    const tokensBefore = await prisma.refreshToken.count({
+      where: { organizationId: orgB.id },
+    });
+
+    // Attempt switch-org with valid bearer token and refreshToken supplied ONLY in JSON body (no Cookie header)
+    const bodyOnlyRes = await request(app)
+      .post('/api/v1/auth/switch-org')
+      .set('Authorization', `Bearer ${primaryToken}`)
+      .set('Origin', 'http://localhost:3000')
+      .set('x-orgsphere-client', 'web')
+      .send({
+        targetOrganizationId: orgB.id,
+        refreshToken: rawRefreshToken,
+      });
+
+    // Must be rejected: strict switchOrgSchema forbids extra fields (400) or missing cookie rejects (401)
+    expect([400, 401]).toContain(bodyOnlyRes.status);
+    expect(bodyOnlyRes.body.success).toBe(false);
+
+    // CRITICAL: Must not issue Set-Cookie header
+    const setCookies = bodyOnlyRes.headers['set-cookie'] as unknown as string[] | undefined;
+    expect(setCookies).toBeUndefined();
+
+    // CRITICAL: Must not create any replacement token record in the database
+    const tokensAfter = await prisma.refreshToken.count({
+      where: { organizationId: orgB.id },
+    });
+    expect(tokensAfter).toBe(tokensBefore);
+  });
+
+  it('proves simultaneous /auth/refresh and /auth/switch-org are serialized via row locking without family invalidation', async () => {
+    const orgB = await getOrgB();
+
+    const loginRes = await request(app)
+      .post('/api/v1/auth/login')
+      .send({
+        email: aliceEmail,
+        password: 'alice-secure-passphrase-2026!',
+      });
+    const primaryToken = loginRes.body.data.accessToken;
+    const cookieA = loginRes.headers['set-cookie'];
+
+    const alice = await prisma.user.findUniqueOrThrow({ where: { email: aliceEmail } });
+    const reuseLogsBefore = await prisma.auditLog.count({
+      where: {
+        action: 'AUTH_TOKEN_REUSE_DETECTED',
+        actorId: alice.id,
+      },
+    });
+
+    // Send simultaneous /auth/refresh and /auth/switch-org presenting the same refresh cookie
+    const [refreshRes, switchRes] = await Promise.all([
+      request(app)
+        .post('/api/v1/auth/refresh')
+        .set('Cookie', cookieA)
+        .set('Origin', 'http://localhost:3000')
+        .set('x-orgsphere-client', 'web'),
+      request(app)
+        .post('/api/v1/auth/switch-org')
+        .set('Authorization', `Bearer ${primaryToken}`)
+        .set('Cookie', cookieA)
+        .set('Origin', 'http://localhost:3000')
+        .set('x-orgsphere-client', 'web')
+        .send({ targetOrganizationId: orgB.id }),
+    ]);
+
+    // Exactly one operation succeeds (200) and the loser gets 409 CONCURRENT_REFRESH_RACE
+    const statuses = [refreshRes.status, switchRes.status].sort();
+    expect(statuses).toEqual([200, 409]);
+
+    const winnerRes = refreshRes.status === 200 ? refreshRes : switchRes;
+    const loserRes = refreshRes.status === 409 ? refreshRes : switchRes;
+
+    expect(loserRes.body.error.code).toBe('CONCURRENT_REFRESH_RACE');
+
+    // Confirm that the winner's new cookie is completely usable
+    const nextRefresh = await request(app)
+      .post('/api/v1/auth/refresh')
+      .set('Cookie', winnerRes.headers['set-cookie'])
+      .set('Origin', 'http://localhost:3000')
+      .set('x-orgsphere-client', 'web');
+
+    expect(nextRefresh.status).toBe(200);
+    expect(nextRefresh.body.data.accessToken).toBeDefined();
+
+    // Confirm that no false security reuse detection was triggered during the race
+    const reuseLogsAfter = await prisma.auditLog.count({
+      where: {
+        action: 'AUTH_TOKEN_REUSE_DETECTED',
+        actorId: alice.id,
+      },
+    });
+    expect(reuseLogsAfter).toBe(reuseLogsBefore);
+  });
+
+  it('proves holding token-row lock across duplicate window causes post-lock request to observe window expiry and trigger replay detection', async () => {
+    const orgB = await getOrgB();
+
+    const loginRes = await request(app)
+      .post('/api/v1/auth/login')
+      .send({
+        email: aliceEmail,
+        password: 'alice-secure-passphrase-2026!',
+      });
+    const primaryToken = loginRes.body.data.accessToken;
+    const cookieA = loginRes.headers['set-cookie'];
+    const cookieStr = Array.isArray(cookieA) ? cookieA.join(';') : (cookieA as string);
+    const match = cookieStr.match(new RegExp(`${getCookieName()}=([^;]+)`));
+    const rawRefreshToken = match ? decodeURIComponent(match[1]) : '';
+    const tokenHash = hashRefreshToken(rawRefreshToken);
+
+    const initialToken = await prisma.refreshToken.findUniqueOrThrow({
+      where: { tokenHash },
+    });
+
+    // Create an active successor token in the same family to verify whole-family revocation
+    const activeSuccessor = await prisma.refreshToken.create({
+      data: {
+        tokenHash: hashRefreshToken(`active-successor-token-${Date.now()}`),
+        userId: initialToken.userId,
+        organizationId: initialToken.organizationId,
+        familyId: initialToken.familyId,
+        expiresAt: new Date(Date.now() + 86400000),
+      },
+    });
+
+    let lockAcquiredResolve: () => void;
+    const lockAcquiredPromise = new Promise<void>((resolve) => {
+      lockAcquiredResolve = resolve;
+    });
+
+    // Holder transaction acquires row lock and revokes the token with ORG_SWITCH
+    const holderPromise = prisma.$transaction(
+      async (tx) => {
+        // 1. Acquire exclusive row lock on the token
+        await tx.$queryRaw`
+          SELECT id FROM refresh_tokens WHERE token_hash = ${tokenHash} FOR UPDATE
+        `;
+
+        // 2. Mark token as rotated/switched at the moment of lock acquisition
+        await tx.refreshToken.update({
+          where: { id: initialToken.id },
+          data: {
+            revokedAt: new Date(),
+            revocationReason: 'ORG_SWITCH',
+          },
+        });
+
+        // 3. Signal that lock is held
+        lockAcquiredResolve();
+
+        // 4. Deliberately hold the row lock across the 5000ms duplicate window boundary
+        await new Promise((resolve) => setTimeout(resolve, 5200));
+      },
+      { maxWait: 10000, timeout: 15000 }
+    );
+
+    // Ensure the holder transaction has acquired the row lock and revoked the token
+    await lockAcquiredPromise;
+
+    // Concurrently invoke switch-org with the locked token.
+    // PostgreSQL blocks this HTTP request on SELECT ... FOR UPDATE while holderPromise sleeps.
+    const competingSwitchPromise = request(app)
+      .post('/api/v1/auth/switch-org')
+      .set('Authorization', `Bearer ${primaryToken}`)
+      .set('Cookie', cookieA)
+      .set('Origin', 'http://localhost:3000')
+      .set('x-orgsphere-client', 'web')
+      .send({ targetOrganizationId: orgB.id });
+
+    // Wait for both to complete
+    const [_, competingRes] = await Promise.all([holderPromise, competingSwitchPromise]);
+
+    // Because the decision time is captured AFTER acquiring the row lock (post-5200ms wait),
+    // timeSinceRevocation is correctly evaluated as > 5000ms.
+    // The request is therefore identified as an expired duplicate / replay attack (401),
+    // NOT misidentified as a concurrent race duplicate (409)!
+    expect(competingRes.status).toBe(401);
+    expect(competingRes.body.error.message).toContain('replay detection');
+
+    // Confirm that the active successor in the family is revoked with SECURITY_REUSE
+    const updatedSuccessor = await prisma.refreshToken.findUniqueOrThrow({
+      where: { id: activeSuccessor.id },
+    });
+    expect(updatedSuccessor.revokedAt).not.toBeNull();
+    expect(updatedSuccessor.revocationReason).toBe('SECURITY_REUSE');
+
+    // Confirm that AUTH_TOKEN_REUSE_DETECTED was recorded
+    const reuseAudit = await prisma.auditLog.findFirst({
+      where: {
+        action: 'AUTH_TOKEN_REUSE_DETECTED',
+        resourceId: initialToken.id,
+      },
+    });
+    expect(reuseAudit).toBeDefined();
+  }, 20000);
 });

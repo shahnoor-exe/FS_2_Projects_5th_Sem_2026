@@ -169,18 +169,42 @@ export async function logout(req: Request, res: Response, next: NextFunction): P
 
 export async function switchOrg(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
+    // Unconditionally enforce CSRF protection on this state-changing session endpoint
+    validateCsrfProtection(req);
+
     const parseResult = switchOrgSchema.safeParse(req.body);
     if (!parseResult.success) {
       return next(new ValidationError('Invalid organization ID format', parseResult.error.format()));
     }
 
+    // Strictly require current refresh cookie; no body-token fallback permitted
+    const cookieToken = req.cookies?.[getCookieName()];
+    if (!cookieToken) {
+      return next(new AuthenticationError('Refresh cookie required to switch organization session'));
+    }
+
     const userId = req.user!.userId;
+    const currentOrgId = req.user!.organizationId;
     const ipAddress = req.ip || req.socket.remoteAddress;
     const requestId = req.headers['x-request-id'] as string;
 
-    const result = await authService.switchOrg(userId, parseResult.data.targetOrganizationId, ipAddress, requestId);
+    const result = await authService.switchOrg(
+      userId,
+      currentOrgId,
+      parseResult.data.targetOrganizationId,
+      cookieToken,
+      ipAddress,
+      requestId
+    );
 
-    sendSuccess(res, result);
+    // Set HTTP-only secure refresh cookie scoped to /api/v1/auth
+    res.cookie(getCookieName(), result.refreshToken, getCookieOptions());
+
+    // Never return plaintext refresh token in JSON response
+    sendSuccess(res, {
+      accessToken: result.accessToken,
+      organization: result.organization,
+    });
   } catch (error) {
     next(error);
   }
