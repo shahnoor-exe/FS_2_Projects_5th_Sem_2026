@@ -1,8 +1,20 @@
 import { Request, Response, NextFunction } from 'express';
 import { organizationsService } from './organizations.service.js';
+import { dashboardService } from './dashboard.service.js';
 import { sendSuccess } from '../../utils/response.js';
 import { updateOrganizationSchema } from '@orgsphere/shared';
 import { ValidationError } from '../../utils/errors.js';
+
+export async function getDashboardMetrics(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const orgId = req.organization!.id;
+    const { data, source } = await dashboardService.getMetrics(orgId);
+    res.setHeader('X-Cache', source);
+    sendSuccess(res, data);
+  } catch (error) {
+    next(error);
+  }
+}
 
 export async function getCurrentOrg(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {

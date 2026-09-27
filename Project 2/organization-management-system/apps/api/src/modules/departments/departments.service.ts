@@ -1,5 +1,6 @@
 import { prisma } from '../../config/prisma.js';
 import { recordAuditLog } from '../audit/audit.service.js';
+import { cacheService, CacheResult } from '../../services/cache.service.js';
 import { NotFoundError, ConflictError } from '../../utils/errors.js';
 import {
   CreateDepartmentInput,
@@ -9,85 +10,135 @@ import {
   ErrorCode,
 } from '@orgsphere/shared';
 
+export interface DepartmentListItem {
+  id: string;
+  name: string;
+  organizationId: string;
+  projectCount: number;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export interface DepartmentListResult {
+  data: DepartmentListItem[];
+  meta: PaginationMeta;
+}
+
+export interface DepartmentDetail {
+  id: string;
+  name: string;
+  organizationId: string;
+  projectCount: number;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+const DEPARTMENTS_CACHE_TTL_SECONDS = 600; // 10 minutes
+
 export const departmentsService = {
-  async listDepartments(orgId: string, query: DepartmentQuery) {
+  async listDepartments(
+    orgId: string,
+    query: DepartmentQuery
+  ): Promise<CacheResult<DepartmentListResult>> {
     const { page, limit, sortBy, sortOrder, search } = query;
-    const skip = (page - 1) * limit;
+    const gen = await cacheService.getGeneration(orgId, 'departments');
+    const queryKey = `p=${page}:l=${limit}:s=${sortBy || 'createdAt'}:o=${sortOrder}:q=${encodeURIComponent(search || '')}`;
+    const cacheKey = `org:${orgId}:departments:v${gen}:list:${queryKey}`;
 
-    const where = {
-      organizationId: orgId,
-      ...(search
-        ? {
-            name: {
-              contains: search,
-              mode: 'insensitive' as const,
+    return cacheService.getOrSet<DepartmentListResult>({
+      key: cacheKey,
+      ttlSeconds: DEPARTMENTS_CACHE_TTL_SECONDS,
+      fetchFn: async () => {
+        const skip = (page - 1) * limit;
+
+        const where = {
+          organizationId: orgId,
+          ...(search
+            ? {
+                name: {
+                  contains: search,
+                  mode: 'insensitive' as const,
+                },
+              }
+            : {}),
+        };
+
+        const [total, items] = await Promise.all([
+          prisma.department.count({ where }),
+          prisma.department.findMany({
+            where,
+            skip,
+            take: limit,
+            orderBy: [{ [sortBy || 'createdAt']: sortOrder }, { id: 'asc' }],
+            include: {
+              _count: {
+                select: { projects: true },
+              },
             },
-          }
-        : {}),
-    };
+          }),
+        ]);
 
-    const [total, items] = await Promise.all([
-      prisma.department.count({ where }),
-      prisma.department.findMany({
-        where,
-        skip,
-        take: limit,
-        orderBy: [{ [sortBy || 'createdAt']: sortOrder }, { id: 'asc' }],
-        include: {
-          _count: {
-            select: { projects: true },
-          },
-        },
-      }),
-    ]);
+        const totalPages = Math.ceil(total / limit) || 1;
+        const meta: PaginationMeta = {
+          page,
+          limit,
+          total,
+          totalPages,
+          hasNextPage: page < totalPages,
+          hasPreviousPage: page > 1,
+        };
 
-    const totalPages = Math.ceil(total / limit) || 1;
-    const meta: PaginationMeta = {
-      page,
-      limit,
-      total,
-      totalPages,
-      hasNextPage: page < totalPages,
-      hasPreviousPage: page > 1,
-    };
+        const data: DepartmentListItem[] = items.map((dept) => ({
+          id: dept.id,
+          name: dept.name,
+          organizationId: dept.organizationId,
+          projectCount: dept._count.projects,
+          createdAt: dept.createdAt,
+          updatedAt: dept.updatedAt,
+        }));
 
-    const data = items.map((dept) => ({
-      id: dept.id,
-      name: dept.name,
-      organizationId: dept.organizationId,
-      projectCount: dept._count.projects,
-      createdAt: dept.createdAt,
-      updatedAt: dept.updatedAt,
-    }));
-
-    return { data, meta };
-  },
-
-  async getDepartment(orgId: string, departmentId: string) {
-    const dept = await prisma.department.findFirst({
-      where: {
-        id: departmentId,
-        organizationId: orgId,
-      },
-      include: {
-        _count: {
-          select: { projects: true },
-        },
+        return { data, meta };
       },
     });
+  },
 
-    if (!dept) {
-      throw new NotFoundError('Department not found');
-    }
+  async getDepartment(
+    orgId: string,
+    departmentId: string
+  ): Promise<CacheResult<DepartmentDetail>> {
+    const gen = await cacheService.getGeneration(orgId, 'departments');
+    const cacheKey = `org:${orgId}:department:${departmentId}:v${gen}`;
 
-    return {
-      id: dept.id,
-      name: dept.name,
-      organizationId: dept.organizationId,
-      projectCount: dept._count.projects,
-      createdAt: dept.createdAt,
-      updatedAt: dept.updatedAt,
-    };
+    return cacheService.getOrSet<DepartmentDetail>({
+      key: cacheKey,
+      ttlSeconds: DEPARTMENTS_CACHE_TTL_SECONDS,
+      fetchFn: async () => {
+        const dept = await prisma.department.findFirst({
+          where: {
+            id: departmentId,
+            organizationId: orgId,
+          },
+          include: {
+            _count: {
+              select: { projects: true },
+            },
+          },
+        });
+
+        if (!dept) {
+          throw new NotFoundError('Department not found');
+        }
+
+        return {
+          id: dept.id,
+          name: dept.name,
+          organizationId: dept.organizationId,
+          projectCount: dept._count.projects,
+          createdAt: dept.createdAt,
+          updatedAt: dept.updatedAt,
+        };
+      },
+    });
   },
 
   async createDepartment(
@@ -131,6 +182,12 @@ export const departmentsService = {
       requestId,
       metadata: { name: department.name },
     });
+
+    // 4. Invalidate department lookups and dashboard metrics cache
+    await Promise.all([
+      cacheService.bumpGeneration(orgId, 'departments'),
+      cacheService.bumpGeneration(orgId, 'dashboard'),
+    ]);
 
     return {
       id: department.id,
@@ -191,6 +248,12 @@ export const departmentsService = {
       metadata: { previousName: dept.name, newName: updated.name },
     });
 
+    // Invalidate department lookups and dashboard metrics cache
+    await Promise.all([
+      cacheService.bumpGeneration(orgId, 'departments'),
+      cacheService.bumpGeneration(orgId, 'dashboard'),
+    ]);
+
     return {
       id: updated.id,
       name: updated.name,
@@ -207,7 +270,7 @@ export const departmentsService = {
     ipAddress?: string,
     requestId?: string
   ) {
-    return prisma.$transaction(async (tx) => {
+    const result = await prisma.$transaction(async (tx) => {
       // 1. Lock the department row to serialize deletion against concurrent modifications
       const locked = await tx.$queryRaw<Array<{ id: string }>>`
         SELECT id FROM departments WHERE id = ${departmentId} AND organization_id = ${orgId} FOR UPDATE
@@ -250,5 +313,13 @@ export const departmentsService = {
 
       return { success: true, id: departmentId };
     });
+
+    // Invalidate department lookups and dashboard metrics cache
+    await Promise.all([
+      cacheService.bumpGeneration(orgId, 'departments'),
+      cacheService.bumpGeneration(orgId, 'dashboard'),
+    ]);
+
+    return result;
   },
 };

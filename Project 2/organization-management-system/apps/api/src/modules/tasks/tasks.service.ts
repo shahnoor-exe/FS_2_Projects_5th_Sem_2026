@@ -1,5 +1,6 @@
 import { prisma } from '../../config/prisma.js';
 import { recordAuditLog } from '../audit/audit.service.js';
+import { cacheService } from '../../services/cache.service.js';
 import { NotFoundError, AuthorizationError } from '../../utils/errors.js';
 import {
   CreateTaskInput,
@@ -188,6 +189,8 @@ export const tasksService = {
       },
     });
 
+    await cacheService.bumpGeneration(orgId, 'dashboard');
+
     return task;
   },
 
@@ -275,6 +278,8 @@ export const tasksService = {
         metadata: { updatedFields: Object.keys(input) },
       });
 
+      await cacheService.bumpGeneration(orgId, 'dashboard');
+
       return updated;
     }
 
@@ -349,6 +354,8 @@ export const tasksService = {
       },
     });
 
+    await cacheService.bumpGeneration(orgId, 'dashboard');
+
     return updated;
   },
 
@@ -381,6 +388,8 @@ export const tasksService = {
       requestId,
       metadata: { title: task.title },
     });
+
+    await cacheService.bumpGeneration(orgId, 'dashboard');
 
     return { success: true, id: taskId };
   },

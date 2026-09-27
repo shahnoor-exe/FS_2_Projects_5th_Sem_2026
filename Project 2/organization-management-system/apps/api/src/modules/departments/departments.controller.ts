@@ -16,8 +16,9 @@ export async function listDepartments(req: Request, res: Response, next: NextFun
       return next(new ValidationError('Invalid department query parameters', parseResult.error.format()));
     }
 
-    const { data, meta } = await departmentsService.listDepartments(orgId, parseResult.data);
-    sendSuccess(res, data, meta);
+    const { data: result, source } = await departmentsService.listDepartments(orgId, parseResult.data);
+    res.setHeader('X-Cache', source);
+    sendSuccess(res, result.data, result.meta);
   } catch (error) {
     next(error);
   }
@@ -27,7 +28,8 @@ export async function getDepartment(req: Request, res: Response, next: NextFunct
   try {
     const orgId = req.organization!.id;
     const { departmentId } = req.params;
-    const department = await departmentsService.getDepartment(orgId, departmentId);
+    const { data: department, source } = await departmentsService.getDepartment(orgId, departmentId);
+    res.setHeader('X-Cache', source);
     sendSuccess(res, department);
   } catch (error) {
     next(error);

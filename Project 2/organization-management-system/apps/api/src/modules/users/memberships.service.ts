@@ -1,5 +1,6 @@
 import { prisma } from '../../config/prisma.js';
 import { recordAuditLog } from '../audit/audit.service.js';
+import { cacheService } from '../../services/cache.service.js';
 import {
   NotFoundError,
   ConflictError,
@@ -115,7 +116,7 @@ export const membershipsService = {
     ipAddress?: string,
     requestId?: string
   ) {
-    return prisma.$transaction(async (tx) => {
+    const result = await prisma.$transaction(async (tx) => {
       // 1. Organization row lock serializes membership mutations in this tenant
       await tx.$queryRaw`SELECT id FROM organizations WHERE id = ${orgId} FOR UPDATE`;
 
@@ -245,6 +246,10 @@ export const membershipsService = {
 
       return created;
     });
+
+    await cacheService.bumpGeneration(orgId, 'dashboard');
+
+    return result;
   },
 
   async updateMembershipRole(
@@ -255,7 +260,7 @@ export const membershipsService = {
     ipAddress?: string,
     requestId?: string
   ) {
-    return prisma.$transaction(async (tx) => {
+    const result = await prisma.$transaction(async (tx) => {
       // 1. Organization row lock
       await tx.$queryRaw`SELECT id FROM organizations WHERE id = ${orgId} FOR UPDATE`;
 
@@ -351,6 +356,10 @@ export const membershipsService = {
 
       return updated;
     });
+
+    await cacheService.bumpGeneration(orgId, 'dashboard');
+
+    return result;
   },
 
   async updateMembershipStatus(
@@ -361,7 +370,7 @@ export const membershipsService = {
     ipAddress?: string,
     requestId?: string
   ) {
-    return prisma.$transaction(async (tx) => {
+    const result = await prisma.$transaction(async (tx) => {
       // 1. Organization row lock
       await tx.$queryRaw`SELECT id FROM organizations WHERE id = ${orgId} FOR UPDATE`;
 
@@ -474,5 +483,9 @@ export const membershipsService = {
 
       return updated;
     });
+
+    await cacheService.bumpGeneration(orgId, 'dashboard');
+
+    return result;
   },
 };

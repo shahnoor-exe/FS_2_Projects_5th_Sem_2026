@@ -1,5 +1,6 @@
 import { prisma } from '../../config/prisma.js';
 import { recordAuditLog } from '../audit/audit.service.js';
+import { cacheService } from '../../services/cache.service.js';
 import { NotFoundError, ConflictError } from '../../utils/errors.js';
 import {
   CreateProjectInput,
@@ -206,6 +207,11 @@ export const projectsService = {
       },
     });
 
+    await Promise.all([
+      cacheService.bumpGeneration(orgId, 'dashboard'),
+      cacheService.bumpGeneration(orgId, 'departments'),
+    ]);
+
     return project;
   },
 
@@ -288,6 +294,11 @@ export const projectsService = {
       },
     });
 
+    await Promise.all([
+      cacheService.bumpGeneration(orgId, 'dashboard'),
+      cacheService.bumpGeneration(orgId, 'departments'),
+    ]);
+
     return updated;
   },
 
@@ -299,7 +310,7 @@ export const projectsService = {
     ipAddress?: string,
     requestId?: string
   ) {
-    return prisma.$transaction(async (tx) => {
+    const result = await prisma.$transaction(async (tx) => {
       // 1. Lock the project row
       const locked = await tx.$queryRaw<Array<{ id: string }>>`
         SELECT id FROM projects WHERE id = ${projectId} AND organization_id = ${orgId} FOR UPDATE
@@ -357,5 +368,12 @@ export const projectsService = {
         tasksCascadeDeletedCount: actualDeletedTasks,
       };
     });
+
+    await Promise.all([
+      cacheService.bumpGeneration(orgId, 'dashboard'),
+      cacheService.bumpGeneration(orgId, 'departments'),
+    ]);
+
+    return result;
   },
 };
