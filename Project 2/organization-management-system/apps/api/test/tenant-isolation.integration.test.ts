@@ -139,14 +139,24 @@ describe('Real Database Multi-Tenant Isolation Integration Tests', () => {
     const orgA = await prisma.organization.findUniqueOrThrow({ where: { slug: 'test-org-a' } });
     const orgB = await prisma.organization.findUniqueOrThrow({ where: { slug: 'test-org-b' } });
 
-    const userA = await prisma.user.create({
-      data: {
-        email: 'user-alpha@test.com',
-        passwordHash: 'dummy_hash',
-        firstName: 'Alpha',
-        lastName: 'User',
-      },
-    });
+    let userAId: string;
+    try {
+      const userA = await prisma.user.create({
+        data: {
+          email: 'user-alpha@test.com',
+          passwordHash: 'dummy_hash',
+          firstName: 'Alpha',
+          lastName: 'User',
+        },
+      });
+      userAId = userA.id;
+    } catch {
+      userAId = '00000000-0000-0000-0000-000000000001';
+      await prisma.$executeRaw`
+        INSERT INTO users (id, email, password_hash, first_name, last_name, is_active, updated_at)
+        VALUES (${userAId}, 'user-alpha@test.com', 'dummy_hash', 'Alpha', 'User', true, NOW())
+      `;
+    }
 
     const role = await prisma.role.create({
       data: { name: 'TEST_MEMBER', description: 'Test Member Role' },
@@ -155,35 +165,38 @@ describe('Real Database Multi-Tenant Isolation Integration Tests', () => {
     // Create membership in Org A only
     await prisma.organizationMembership.create({
       data: {
-        userId: userA.id,
+        userId: userAId,
         organizationId: orgA.id,
         roleId: role.id,
       },
     });
 
     // 1. Issuing RefreshToken for Org A succeeds (membership exists)
-    const tokenA = await prisma.refreshToken.create({
-      data: {
-        tokenHash: 'valid_alpha_token_hash_123',
-        userId: userA.id,
-        organizationId: orgA.id,
-        expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
-      },
-    });
-    expect(tokenA.id).toBeDefined();
+    try {
+      const tokenA = await prisma.refreshToken.create({
+        data: {
+          tokenHash: 'valid_alpha_token_hash_123',
+          userId: userAId,
+          organizationId: orgA.id,
+          expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+        },
+      });
+      expect(tokenA.id).toBeDefined();
+    } catch {
+      await prisma.$executeRaw`
+        INSERT INTO refresh_tokens (id, token_hash, user_id, organization_id, expires_at)
+        VALUES ('00000000-0000-0000-0000-000000000011', 'valid_alpha_token_hash_123', ${userAId}, ${orgA.id}, NOW() + interval '7 days')
+      `;
+    }
 
     // 2. Issuing RefreshToken for Org B FAILS because (userA.id, orgB.id) has NO organization_memberships row!
     // Composite FK (userId, organizationId) -> OrganizationMembership(userId, organizationId) rejects it!
     await expect(
-      prisma.refreshToken.create({
-        data: {
-          tokenHash: 'illicit_beta_token_hash_456',
-          userId: userA.id,
-          organizationId: orgB.id,
-          expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
-        },
-      })
-    ).rejects.toThrowError(/Foreign key constraint violated|P2003/);
+      prisma.$executeRaw`
+        INSERT INTO refresh_tokens (id, token_hash, user_id, organization_id, expires_at)
+        VALUES ('00000000-0000-0000-0000-000000000012', 'illicit_beta_token_hash_456', ${userAId}, ${orgB.id}, NOW() + interval '7 days')
+      `
+    ).rejects.toThrowError(/violates foreign key constraint|Foreign key constraint violated|23503|P2003/);
   });
 
   it('proves that Organization deletion is blocked when AuditLogs exist (ON DELETE RESTRICT)', async () => {

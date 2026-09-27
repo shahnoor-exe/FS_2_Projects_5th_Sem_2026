@@ -20,6 +20,7 @@
     "docker:logs": "docker compose logs -f"
   },
   "devDependencies": {
+    "@esbuild/win32-x64": "^0.28.2",
     "typescript": "^5.7.3"
   }
 }

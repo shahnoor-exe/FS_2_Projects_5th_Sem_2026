@@ -52,3 +52,39 @@ export class DatabaseUnavailableError extends AppError {
     super(message, 503, ErrorCode.DATABASE_UNAVAILABLE);
   }
 }
+
+export class TenantMismatchError extends AppError {
+  constructor(message = 'Token organization does not match requested tenant context') {
+    super(message, 403, ErrorCode.TENANT_MISMATCH);
+  }
+}
+
+export class AccountDeactivatedError extends AppError {
+  constructor(message = 'User account has been deactivated') {
+    super(message, 401, ErrorCode.ACCOUNT_DEACTIVATED);
+  }
+}
+
+export class MembershipDeactivatedError extends AppError {
+  constructor(message = 'Organization membership has been deactivated') {
+    super(message, 403, ErrorCode.MEMBERSHIP_DEACTIVATED);
+  }
+}
+
+export class OrganizationDeactivatedError extends AppError {
+  constructor(message = 'Organization has been deactivated') {
+    super(message, 403, ErrorCode.ORGANIZATION_DEACTIVATED);
+  }
+}
+
+export class ConcurrentRefreshRaceError extends AppError {
+  constructor(message = 'Token was already refreshed concurrently. Please use the replacement token.') {
+    super(message, 409, ErrorCode.CONCURRENT_REFRESH_RACE);
+  }
+}
+
+export class RateLimitExceededError extends AppError {
+  constructor(message = 'Too many requests, please try again later', details?: unknown) {
+    super(message, 429, ErrorCode.RATE_LIMITED, details);
+  }
+}

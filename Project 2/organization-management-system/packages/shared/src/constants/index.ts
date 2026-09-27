@@ -1,5 +1,11 @@
-export const SystemRole = {
+export const PlatformRole = {
   SUPER_ADMIN: 'SUPER_ADMIN',
+  USER: 'USER',
+} as const;
+
+export type PlatformRoleType = (typeof PlatformRole)[keyof typeof PlatformRole];
+
+export const SystemRole = {
   ORG_ADMIN: 'ORG_ADMIN',
   MANAGER: 'MANAGER',
   EMPLOYEE: 'EMPLOYEE',
@@ -34,6 +40,12 @@ export const ErrorCode = {
   DATABASE_UNAVAILABLE: 'DATABASE_UNAVAILABLE',
   RATE_LIMITED: 'RATE_LIMITED',
   INTERNAL_ERROR: 'INTERNAL_ERROR',
+  TENANT_MISMATCH: 'TENANT_MISMATCH',
+  ACCOUNT_DEACTIVATED: 'ACCOUNT_DEACTIVATED',
+  MEMBERSHIP_DEACTIVATED: 'MEMBERSHIP_DEACTIVATED',
+  ORGANIZATION_DEACTIVATED: 'ORGANIZATION_DEACTIVATED',
+  CONCURRENT_REFRESH_RACE: 'CONCURRENT_REFRESH_RACE',
+  TOKEN_EXPIRED: 'TOKEN_EXPIRED',
 } as const;
 
 export type ErrorCodeType = (typeof ErrorCode)[keyof typeof ErrorCode];
