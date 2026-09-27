@@ -1,9 +1,12 @@
 # OrgSphere — Organization Management System
 
-## Status
-**Implementation complete; database and Compose runtime verification pending**
-
-OrgSphere is an enterprise-grade multi-organization workspace application built with Node.js, Express, TypeScript, React, PostgreSQL (Prisma ORM), Redis, and Docker.
+## Status & Verification Scope
+- **Implementation Status**: Phases 1 through 5 implemented and verified against the committed contract (`20dae0d1068bcaa2165dd7bf0af45bd5cd014456`).
+- **Verified Environment**: Local development and integration test environment (Live Express API on port 4000, Vite React SPA on port 3000, PostgreSQL container on port 5433 host / 5432 container, Redis container on port 6379 host).
+- **Test Suite Results**: 105 automated tests passing:
+  - **92 Backend Integration Tests** (`vitest` in `@orgsphere/api`): Multi-tenant isolation, composite FK enforcement, Argon2id security, token family rotation with 5s duplicate window, 3-tier immediate deactivation, sole-admin protection, rate limiting, and Redis cache-aside fallback.
+  - **13 Frontend Browser E2E Journeys** (`playwright` Chromium in `@orgsphere/web`): Core admin workflows, department/project synchronization, task creation and project deletion with confirmation & cascade, member assignment ("Add existing user"), tenant switcher with reload persistence, manager/employee/viewer sessions with permission guardrails and 403 denials, concurrent 401 refresh queuing, keyboard Escape dismissal, 375x667 mobile rendering, and `prefers-reduced-motion` animation clamping.
+- **Unverified / Delivery Limitations**: Full multi-container Docker Compose build/orchestration for `api` and `web` containers simultaneously (`docker compose up` for application containers) and production cloud deployment remain unverified.
 
 ---
 
@@ -12,20 +15,20 @@ OrgSphere is an enterprise-grade multi-organization workspace application built 
 ```mermaid
 flowchart LR
     subgraph Clients
-        Web["React + Vite SPA\n(:3000)"]
+        Web["React + Vite SPA\n(:3000)\nIn-Memory Access Token\nHttpOnly Refresh Cookie"]
     end
 
     subgraph Backend
-        API["Express API Server\n(:4000)"]
+        API["Express API Server\n(:4000)\nArgon2id + AES-256-GCM\nStructured Pino Logging\nOpenTelemetry Tracing"]
     end
 
     subgraph Services
-        Postgres[("PostgreSQL 16\n(Port 5433 host / 5432 container)")]
-        Redis[("Redis 7 Cache\n(:6379)")]
+        Postgres[("PostgreSQL 16\n(Port 5433 host / 5432 container)\nComposite FK Isolation\nPrisma ORM")]
+        Redis[("Redis 7 Cache\n(:6379)\nCache-Aside & Invalidation\nRate Limiting")]
     end
 
-    Web -->|REST /api/v1| API
-    API -->|Prisma ORM| Postgres
+    Web -->|REST /api/v1 (credentials: include)| API
+    API -->|Prisma Client| Postgres
     API -->|ioredis| Redis
 ```
 
@@ -42,32 +45,34 @@ Detailed design and specification documents are located in [`docs/`](./docs/):
 
 | Layer | Technology | Role |
 |---|---|---|
-| **Frontend** | React, Vite, TypeScript, Tailwind CSS | Single-page application (`apps/web`) |
-| **Backend** | Node.js, Express, TypeScript | REST API (`apps/api`) |
-| **Database** | PostgreSQL 16, Prisma ORM | Relational multi-tenant persistence with composite constraints |
-| **Cache** | Redis 7 (`ioredis`) | Cache-aside for metrics and read-heavy lookups |
-| **Validation** | Zod | Request payload, query, and environment validation |
-| **Observability** | Pino, OpenTelemetry (HTTP OTLP) | Structured logging with correlation IDs & distributed tracing |
+| **Frontend** | React 19, Vite 6, TypeScript | Single-page application (`apps/web`) with in-memory token storage |
+| **Styling** | Vanilla CSS Design System | Curated dark glassmorphic palette, CSS variables, micro-animations, and `prefers-reduced-motion` compliance |
+| **Backend** | Node.js, Express, TypeScript | REST API (`apps/api`) with correlation IDs & standardized response envelope |
+| **Database** | PostgreSQL 16, Prisma ORM | Relational multi-tenant persistence with engine-level composite foreign key constraints |
+| **Cache & Limiting** | Redis 7 (`ioredis`) | Cache-aside for metrics, cache invalidation on mutations, failover resilience, rate limiting |
+| **Security** | Argon2id, AES-256-GCM, Crypto | Secure password hashing, PII encryption (phone numbers), cryptographically hashed rotating refresh tokens |
+| **Validation** | Zod | Runtime payload, query, and environment validation via `@orgsphere/shared` |
+| **Observability** | Pino, OpenTelemetry (HTTP OTLP) | Structured logging with request correlation IDs & distributed tracing |
 | **Documentation** | Swagger UI / OpenAPI 3.0 | Interactive API contract served at `/api/v1/docs` |
-| **Containers** | Docker, Docker Compose | Multi-container orchestration |
+| **Containers** | Docker, Docker Compose | Containerized PostgreSQL and Redis backing services |
 
 ---
 
-## Database Entities (11 Entities)
+## Role-Based Access Control (RBAC) Specification
 
-1. **User** — System users with encrypted PII fields and password hashes.
-2. **Organization** — Multi-tenant organization boundaries.
-3. **OrganizationMembership** — Binds User + Organization + Role.
-4. **Role** — System and organization-level roles.
-5. **Permission** — Granular action permissions.
-6. **RolePermission** — Join table mapping permissions to roles.
-7. **Department** — Department organizational units within a tenant.
-8. **Project** — Projects with department ownership and member leads.
-9. **Task** — Tasks with project containment and member assignees.
-10. **RefreshToken** — Cryptographically hashed rotating refresh tokens.
-11. **AuditLog** — Immutable audit trail with actor, action, tenant, IP, and request ID.
+The system implements 4 tenant roles with strict, engine-enforced and API-enforced guardrails:
 
-### Multi-Tenant Integrity Guarantees
+| Role | Permissions | UI Capabilities & Restrictions |
+|---|---|---|
+| **ORG_ADMIN** | `org:manage`, `org:read`, `dept:manage`, `dept:read`, `member:manage`, `member:read`, `project:manage`, `project:read`, `task:manage`, `task:read`, `task:update_assigned`, `audit:read` | Full governance: manage organization, create/edit/delete departments, manage projects (with cascade task delete), add existing users as members, view audit trail, and access tenant settings. |
+| **MANAGER** | `org:read`, `dept:read`, `member:read`, `project:manage`, `project:read`, `task:manage`, `task:read`, `task:update_assigned` | Full project and task lifecycle management. Read-only visibility for departments and members (cannot create or modify departments). Administrative views (Audit Logs, Organization Settings) are omitted from navigation. |
+| **EMPLOYEE** | `org:read`, `dept:read`, `member:read`, `project:read`, `task:read`, `task:update_assigned` | View departments, members, projects, and tasks. Restricted mutation: can update **status** and **description** on explicitly assigned tasks only; title, priority, project, and assignee fields are immutable. Creation and deletion controls omitted; direct mutations on unassigned tasks rejected with `403 Forbidden`. |
+| **VIEWER** | `org:read`, `dept:read`, `member:read`, `project:read`, `task:read` | Complete read-only access across the organization. All creation, editing, and deletion buttons are omitted from the DOM; state-changing API requests rejected with `403 Forbidden`. |
+
+---
+
+## Multi-Tenant Integrity Guarantees
+
 Cross-tenant leakage is prevented at the database engine level using composite foreign keys:
 - Projects can only reference Departments in the same organization: `(departmentId, organizationId) -> Department(id, organizationId)`.
 - Project owners must belong to the same organization: `(ownerId, organizationId) -> OrganizationMembership(userId, organizationId)`.
@@ -91,8 +96,9 @@ cp .env.example .env
 
 #### Port Assignment & Database Notes:
 - **Docker Compose PostgreSQL**: Bound to host port `5433` (e.g. `localhost:5433`) to prevent collision with any existing local PostgreSQL service running on port `5432`.
-- **Existing Local PostgreSQL**: If using an existing local PostgreSQL service on port `5432`, create a dedicated database named `orgsphere_dev` to keep existing databases completely untouched, and configure `DATABASE_URL` in `.env`.
-- **Container Network**: Inside Docker containers, the API connects to `postgres:5432` using Docker internal DNS.
+- **Docker Compose Redis**: Bound to host port `6379`.
+- **API Server**: Runs on port `4000`.
+- **Frontend SPA**: Runs on port `3000` (Vite dev server with `/api` proxy).
 
 ### 3. Install Dependencies
 From `Project 2/organization-management-system`:
@@ -112,16 +118,16 @@ npm run prisma:generate
 npm run prisma:migrate
 ```
 
-### 5. Running the Application
-- **Start All Services with Docker**:
+### 5. Running the Application in Development
+- **Start Backing Services (PostgreSQL & Redis)**:
   ```bash
-  docker compose up -d
+  docker compose up -d postgres redis
   ```
-- **Run API in Local Development Mode**:
+- **Run API Server**:
   ```bash
   npm run dev:api
   ```
-- **Run Frontend in Local Development Mode**:
+- **Run Frontend SPA**:
   ```bash
   npm run dev:web
   ```
@@ -132,23 +138,12 @@ npm run prisma:migrate
 
 | Command | Action |
 |---|---|
-| `npm run typecheck` | Run TypeScript compiler checks across all workspaces (`tsc --noEmit`). |
-| `npm run test` | Run test suites across all workspaces. |
+| `npm run build` | Build all workspaces (`@orgsphere/shared`, `@orgsphere/api`, `@orgsphere/web`). |
+| `npm run typecheck` | Run TypeScript compiler typechecks across all workspaces (`tsc --noEmit`). |
+| `npm test --workspace=@orgsphere/api` | Run the complete 92-test backend integration suite. |
+| `npm run test:e2e --workspace=@orgsphere/web` | Run the complete 13-test browser E2E suite via Playwright. |
 | `npm run dev:api` | Start the Express API development server with live reload. |
 | `npm run dev:web` | Start the Vite React development server. |
 | `npm run prisma:generate` | Generate the Prisma client. |
 | `npm run prisma:validate` | Validate `schema.prisma` syntax and relation constraints. |
-| `npm run docker:up` | Start PostgreSQL, Redis, API, and Web via Docker Compose. |
-| `npm run docker:down` | Stop and remove Docker Compose containers. |
-
----
-
-## Phase 1 Foundation Endpoints
-
-Once the API server is running, the following endpoints are available:
-
-- `GET http://localhost:4000/api/v1/health` — System liveness check.
-- `GET http://localhost:4000/api/v1/ready` — Readiness probe (PostgreSQL hard dependency, Redis optional cache status).
-- `GET http://localhost:4000/api/v1/version` — Service and version payload.
-- `GET http://localhost:4000/api/v1/docs` — Interactive Swagger UI documentation.
-- `GET http://localhost:4000/api/v1/docs/openapi.json` — Raw OpenAPI 3.0 specification.
+| `npm run prisma:migrate` | Apply Prisma database migrations. |
