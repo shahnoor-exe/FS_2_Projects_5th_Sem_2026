@@ -1,20 +1,19 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
-
-export const App = () => {
-  return (
-    <div style={{ padding: '2rem', fontFamily: 'sans-serif' }}>
-      <h1>OrgSphere</h1>
-      <p>Organization Management System — Implementation in Progress</p>
-    </div>
-  );
-};
+import { ToastProvider } from './context/ToastContext.js';
+import { AuthProvider } from './context/AuthContext.js';
+import { App } from './App.js';
+import './index.css';
 
 const rootElement = document.getElementById('root');
 if (rootElement) {
   ReactDOM.createRoot(rootElement).render(
     <React.StrictMode>
-      <App />
+      <ToastProvider>
+        <AuthProvider>
+          <App />
+        </AuthProvider>
+      </ToastProvider>
     </React.StrictMode>
   );
 }
