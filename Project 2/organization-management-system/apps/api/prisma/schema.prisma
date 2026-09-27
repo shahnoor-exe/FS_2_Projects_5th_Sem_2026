@@ -1,0 +1,223 @@
+// ═══════════════════════════════════════════════════════════════════════════════
+// OrgSphere Prisma Schema — Multi-Tenant Architecture (11 Entities)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── 1. User Entity ──────────────────────────────────────────────────────────
+model User {
+  id              String   @id @default(uuid())
+  email           String   @unique
+  passwordHash    String   @map("password_hash")
+  firstName       String   @map("first_name")
+  lastName        String   @map("last_name")
+  phoneCiphertext String?  @map("phone_ciphertext")
+  phoneIv         String?  @map("phone_iv")
+  phoneTag        String?  @map("phone_tag")
+  isActive        Boolean  @default(true) @map("is_active")
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  memberships   OrganizationMembership[]
+  refreshTokens RefreshToken[]
+  auditLogs     AuditLog[]
+
+  @@map("users")
+}
+
+// ─── 2. Organization Entity ──────────────────────────────────────────────────
+model Organization {
+  id        String   @id @default(uuid())
+  name      String
+  slug      String   @unique
+  isActive  Boolean  @default(true) @map("is_active")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  memberships   OrganizationMembership[]
+  departments   Department[]
+  projects      Project[]
+  tasks         Task[]
+  refreshTokens RefreshToken[]
+  auditLogs     AuditLog[]
+
+  @@map("organizations")
+}
+
+// ─── 3. OrganizationMembership Entity ────────────────────────────────────────
+model OrganizationMembership {
+  id             String   @id @default(uuid())
+  userId         String   @map("user_id")
+  organizationId String   @map("organization_id")
+  roleId         String   @map("role_id")
+  isActive       Boolean  @default(true) @map("is_active")
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  role         Role         @relation(fields: [roleId], references: [id], onDelete: Restrict)
+
+  ownedProjects Project[]
+  assignedTasks Task[]
+  refreshTokens RefreshToken[]
+
+  @@unique([userId, organizationId])
+  @@unique([id, organizationId])
+  @@index([organizationId, roleId])
+  @@map("organization_memberships")
+}
+
+// ─── 4. Role Entity ──────────────────────────────────────────────────────────
+model Role {
+  id           String   @id @default(uuid())
+  name         String   @unique
+  description  String?
+  isSystemRole Boolean  @default(false) @map("is_system_role")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  memberships     OrganizationMembership[]
+  rolePermissions RolePermission[]
+
+  @@map("roles")
+}
+
+// ─── 5. Permission Entity ────────────────────────────────────────────────────
+model Permission {
+  id          String   @id @default(uuid())
+  action      String   @unique
+  description String?
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  rolePermissions RolePermission[]
+
+  @@map("permissions")
+}
+
+// ─── 6. RolePermission (Join Entity) ─────────────────────────────────────────
+model RolePermission {
+  id           String @id @default(uuid())
+  roleId       String @map("role_id")
+  permissionId String @map("permission_id")
+
+  role       Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@unique([roleId, permissionId])
+  @@map("role_permissions")
+}
+
+// ─── 7. Department Entity ────────────────────────────────────────────────────
+model Department {
+  id             String   @id @default(uuid())
+  name           String
+  organizationId String   @map("organization_id")
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  projects     Project[]
+
+  @@unique([id, organizationId])
+  @@unique([organizationId, name])
+  @@map("departments")
+}
+
+// ─── 8. Project Entity ───────────────────────────────────────────────────────
+model Project {
+  id             String    @id @default(uuid())
+  name           String
+  description    String?
+  status         String    @default("PLANNING")
+  startDate      DateTime? @map("start_date")
+  endDate        DateTime? @map("end_date")
+  organizationId String    @map("organization_id")
+  departmentId   String?   @map("department_id")
+  ownerId        String?   @map("owner_id")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
+
+  organization Organization            @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  department   Department?             @relation(fields: [departmentId, organizationId], references: [id, organizationId], onDelete: Restrict)
+  owner        OrganizationMembership? @relation(fields: [ownerId, organizationId], references: [userId, organizationId], onDelete: Restrict)
+
+  tasks Task[]
+
+  @@unique([id, organizationId])
+  @@index([organizationId, status])
+  @@index([organizationId, createdAt])
+  @@map("projects")
+}
+
+// ─── 9. Task Entity ──────────────────────────────────────────────────────────
+model Task {
+  id             String    @id @default(uuid())
+  title          String
+  description    String?
+  priority       String    @default("MEDIUM")
+  status         String    @default("TODO")
+  dueDate        DateTime? @map("due_date")
+  organizationId String    @map("organization_id")
+  projectId      String    @map("project_id")
+  assigneeId     String?   @map("assignee_id")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
+
+  organization Organization            @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  project      Project                 @relation(fields: [projectId, organizationId], references: [id, organizationId], onDelete: Cascade)
+  assignee     OrganizationMembership? @relation(fields: [assigneeId, organizationId], references: [userId, organizationId], onDelete: Restrict)
+
+  @@index([organizationId, status])
+  @@index([projectId, status])
+  @@index([assigneeId, status])
+  @@index([organizationId, dueDate])
+  @@map("tasks")
+}
+
+// ─── 10. RefreshToken Entity ─────────────────────────────────────────────────
+model RefreshToken {
+  id             String    @id @default(uuid())
+  tokenHash      String    @unique @map("token_hash")
+  userId         String    @map("user_id")
+  organizationId String    @map("organization_id")
+  expiresAt      DateTime  @map("expires_at")
+  revokedAt      DateTime? @map("revoked_at")
+  createdAt      DateTime  @default(now()) @map("created_at")
+
+  user         User                   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  organization Organization           @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  membership   OrganizationMembership @relation(fields: [userId, organizationId], references: [userId, organizationId], onDelete: Cascade)
+
+  @@index([userId, organizationId])
+  @@map("refresh_tokens")
+}
+
+// ─── 11. AuditLog Entity ─────────────────────────────────────────────────────
+model AuditLog {
+  id             String   @id @default(uuid())
+  organizationId String   @map("organization_id")
+  actorId        String?  @map("actor_id")
+  action         String
+  resourceType   String   @map("resource_type")
+  resourceId     String?  @map("resource_id")
+  ipAddress      String?  @map("ip_address")
+  requestId      String?  @map("request_id")
+  metadata       Json?
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  actor        User?        @relation(fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId, createdAt])
+  @@index([organizationId, action])
+  @@map("audit_logs")
+}

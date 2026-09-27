@@ -1,0 +1,25 @@
+{
+  "name": "orgsphere-workspace",
+  "version": "1.0.0",
+  "private": true,
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "dev:api": "npm --workspace=@orgsphere/api run dev",
+    "dev:web": "npm --workspace=@orgsphere/web run dev",
+    "prisma:generate": "npm --workspace=@orgsphere/api run prisma:generate",
+    "prisma:migrate": "npm --workspace=@orgsphere/api run prisma:migrate",
+    "prisma:validate": "npm --workspace=@orgsphere/api run prisma:validate",
+    "docker:up": "docker compose up -d",
+    "docker:down": "docker compose down",
+    "docker:logs": "docker compose logs -f"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.3"
+  }
+}
